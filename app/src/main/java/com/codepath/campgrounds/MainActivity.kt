@@ -3,12 +3,15 @@ package com.codepath.campgrounds
 import android.os.Bundle
 import android.util.Log
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.DividerItemDecoration
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import com.codepath.campgrounds.databinding.ActivityMainBinding
 import com.codepath.asynchttpclient.AsyncHttpClient
 import com.codepath.asynchttpclient.callback.JsonHttpResponseHandler
+import com.codepath.campgrounds.databinding.ActivityMainBinding
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import okhttp3.Headers
 import org.json.JSONException
@@ -21,26 +24,24 @@ fun createJson() = Json {
 
 private const val TAG = "CampgroundsMain/"
 private val PARKS_API_KEY = BuildConfig.API_KEY
-
 private val CAMPGROUNDS_URL =
     "https://developer.nps.gov/api/v1/campgrounds?api_key=${PARKS_API_KEY}"
 
 class MainActivity : AppCompatActivity() {
-    private lateinit var campgroundsRecyclerView: RecyclerView
-    private lateinit var binding: ActivityMainBinding
 
-    // TODO: Create campgrounds list
+    private lateinit var binding: ActivityMainBinding
+    private lateinit var campgroundsRecyclerView: RecyclerView
+
     private val campgrounds = mutableListOf<Campground>()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         binding = ActivityMainBinding.inflate(layoutInflater)
-        val view = binding.root
-        setContentView(view)
+        setContentView(binding.root)
 
-        campgroundsRecyclerView = findViewById(R.id.campgrounds)
+        campgroundsRecyclerView = binding.campgrounds
 
-        // TODO: Set up CampgroundAdapter with campgrounds
         val campgroundAdapter = CampgroundAdapter(this, campgrounds)
         campgroundsRecyclerView.adapter = campgroundAdapter
 
@@ -49,36 +50,77 @@ class MainActivity : AppCompatActivity() {
             campgroundsRecyclerView.addItemDecoration(dividerItemDecoration)
         }
 
+        // Step 7: Load items from the Room database and update the RecyclerView
+        lifecycleScope.launch {
+            (application as CampgroundApplication)
+                .db
+                .campgroundDao()
+                .getAll()
+                .collect { databaseList ->
+
+                    val mappedList = databaseList.map { entity ->
+                        Campground(
+                            entity.name,
+                            entity.description,
+                            entity.latLong,
+                            listOf(CampgroundImage(entity.imageUrl, null))
+                        )
+                    }
+
+                    campgrounds.clear()
+                    campgrounds.addAll(mappedList)
+                    campgroundAdapter.notifyDataSetChanged()
+                }
+        }
+
         val client = AsyncHttpClient()
         client.get(CAMPGROUNDS_URL, object : JsonHttpResponseHandler() {
+
             override fun onFailure(
                 statusCode: Int,
                 headers: Headers?,
                 response: String?,
                 throwable: Throwable?
             ) {
-                Log.e(TAG, "Failed to fetch campgrounds: $statusCode")
+                Log.e(TAG, "Failed to fetch campgrounds: $statusCode", throwable)
             }
 
             override fun onSuccess(statusCode: Int, headers: Headers, json: JSON) {
-                Log.i(TAG, "Successfully fetched campgrounds: $json")
+                Log.i(TAG, "Successfully fetched campgrounds")
+
                 try {
-                    // TODO: Create the parsedJSON
                     val parsedJson = createJson().decodeFromString(
                         CampgroundResponse.serializer(),
                         json.jsonObject.toString()
                     )
-                    // TODO: Do something with the returned json (contains campground information)
-                    parsedJson.data?.let { list ->
-                        campgrounds.addAll(list)
-                        // TODO: Notify the adapter that the dataset has changed
-                        campgroundAdapter.notifyDataSetChanged()
+
+                    val list = parsedJson.data ?: emptyList()
+
+                    // Save the network results into Room database
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        val dao = (application as CampgroundApplication)
+                            .db
+                            .campgroundDao()
+
+                        dao.deleteAll()
+                        dao.insertAll(
+                            list.map {
+                                CampgroundEntity(
+                                    name = it.name,
+                                    description = it.description,
+                                    latLong = it.latLong,
+                                    imageUrl = it.imageUrl
+                                )
+                            }
+                        )
                     }
+
                 } catch (e: JSONException) {
-                    Log.e(TAG, "Exception: $e")
+                    Log.e(TAG, "JSON parsing error: $e")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Unexpected error: $e")
                 }
             }
-
         })
     }
 }
